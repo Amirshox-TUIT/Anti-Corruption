@@ -72,6 +72,37 @@ class Report(BaseModel):
     ai_flags = models.JSONField(default=list, blank=True)
     ai_source = models.CharField(max_length=24, blank=True, default="")
 
+    # ── Reward / Claim fields ─────────────────────────────────────────────────
+    reward_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Reward amount in USDT assigned by admin when status → done",
+    )
+    reward_claimed = models.BooleanField(
+        default=False,
+        help_text="True once the whistleblower has claimed the payout",
+    )
+    reward_wallet = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Crypto wallet address supplied at claim time",
+    )
+    reward_claimed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when the reward was claimed",
+    )
+    reward_tx_hash = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text="On-chain tx hash (or mock reference) for audit trail",
+    )
+    # ─────────────────────────────────────────────────────────────────────────
+
     class Meta:
         db_table = "reports"
         indexes = [

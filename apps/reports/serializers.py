@@ -1,3 +1,5 @@
+import re
+
 from django.contrib.auth import authenticate, get_user_model
 from django.utils import timezone
 from rest_framework import serializers
@@ -5,6 +7,14 @@ from rest_framework import serializers
 from apps.reports.models import CorruptionType, Report, ReportEvidence, ReportStatus
 
 User = get_user_model()
+
+# Basic crypto wallet validation (ETH / EVM compatible, Tron TRC-20, Solana)
+_WALLET_RE = re.compile(
+    r"^(0x[0-9a-fA-F]{40}"   # Ethereum / EVM
+    r"|T[1-9A-HJ-NP-Za-km-z]{33}"  # Tron (USDT-TRC20)
+    r"|[1-9A-HJ-NP-Za-km-z]{32,44}"  # Solana / Bitcoin base58
+    r")$"
+)
 
 
 class ReportEvidenceSerializer(serializers.ModelSerializer):
@@ -51,6 +61,7 @@ class ReportReadSerializer(serializers.ModelSerializer):
     evidence = serializers.SerializerMethodField()
     timeline = serializers.SerializerMethodField()
     aiInsight = serializers.SerializerMethodField()
+    rewardInfo = serializers.SerializerMethodField()
 
     class Meta:
         model = Report
@@ -71,6 +82,7 @@ class ReportReadSerializer(serializers.ModelSerializer):
             "evidence",
             "timeline",
             "aiInsight",
+            "rewardInfo",
         )
 
     def get_evidence(self, obj: Report):
@@ -98,6 +110,32 @@ class ReportReadSerializer(serializers.ModelSerializer):
             "source": obj.ai_source or "heuristic",
         }
 
+    def get_rewardInfo(self, obj: Report):
+        """
+        Public-safe reward snapshot.
+        Wallet address is masked after claim to protect anonymity:
+          0xA1B2C3...DEAD  →  0xA1B2****DEAD
+        """
+        if obj.reward_amount is None:
+            return None
+
+        wallet = obj.reward_wallet or ""
+        masked_wallet = ""
+        if wallet:
+            if wallet.startswith("0x") and len(wallet) >= 10:
+                masked_wallet = wallet[:6] + "****" + wallet[-4:]
+            else:
+                masked_wallet = wallet[:4] + "****" + wallet[-4:]
+
+        return {
+            "amount": str(obj.reward_amount),
+            "currency": "USDT",
+            "claimed": obj.reward_claimed,
+            "claimedAt": obj.reward_claimed_at,
+            "wallet": masked_wallet,
+            "txHash": obj.reward_tx_hash or None,
+        }
+
 
 class ReportCreateSerializer(serializers.Serializer):
     corruptionType = serializers.ChoiceField(choices=CorruptionType.choices)
@@ -107,7 +145,6 @@ class ReportCreateSerializer(serializers.Serializer):
     cityId = serializers.CharField(max_length=64)
     organizationTypeId = serializers.CharField(max_length=64)
     organizationId = serializers.CharField(max_length=128)
-    contact = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
     evidenceFiles = serializers.ListField(
         child=serializers.FileField(),
         required=False,
@@ -148,6 +185,63 @@ class ReportCreateSerializer(serializers.Serializer):
 
 class ReportStatusUpdateSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=ReportStatus.choices)
+
+
+class RewardAssignSerializer(serializers.Serializer):
+    """Admin assigns a reward amount when marking a report as done."""
+
+    amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value="1.00",
+    )
+
+
+class RewardClaimSerializer(serializers.Serializer):
+    """
+    Whistleblower submits tracking_id + wallet to claim reward.
+    No authentication required — the tracking_id *is* the secret token.
+    """
+
+    trackingId = serializers.CharField()
+    wallet = serializers.CharField(max_length=255)
+
+    def validate_wallet(self, value: str) -> str:
+        value = value.strip()
+        if not _WALLET_RE.match(value):
+            raise serializers.ValidationError(
+                "Invalid wallet address. Supported formats: EVM (0x…), Tron (T…), Solana."
+            )
+        return value
+
+    def validate(self, attrs):
+        tracking_id = attrs["trackingId"].strip()
+        report = (
+            Report.objects.filter(tracking_id__iexact=tracking_id)
+            .select_related()
+            .first()
+        )
+
+        if not report:
+            raise serializers.ValidationError({"trackingId": "No report found with this tracking ID."})
+
+        if report.status != ReportStatus.DONE:
+            raise serializers.ValidationError(
+                {"trackingId": "Reward is only available after the report is marked as done."}
+            )
+
+        if report.reward_amount is None:
+            raise serializers.ValidationError(
+                {"trackingId": "No reward has been assigned to this report yet."}
+            )
+
+        if report.reward_claimed:
+            raise serializers.ValidationError(
+                {"trackingId": "This reward has already been claimed."}
+            )
+
+        attrs["report"] = report
+        return attrs
 
 
 class AdminCredentialsSerializer(serializers.Serializer):
